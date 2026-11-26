@@ -1,11 +1,18 @@
-import * as pdfjsLib from 'pdfjs-dist';
+import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { DetectedFontFamily, TextItemOverlay } from '@/types/pdf';
 
-if (typeof window !== 'undefined') {
-  pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
+async function getPdfJs() {
+  const pdfjsLib = await import('pdfjs-dist');
+  if (typeof window !== 'undefined' && !pdfjsLib.GlobalWorkerOptions.workerSrc) {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
+  }
+  return pdfjsLib;
 }
 
-export async function loadPdfDocument(arrayBuffer: ArrayBuffer) {
+export async function loadPdfDocument(
+  arrayBuffer: ArrayBuffer
+): Promise<PDFDocumentProxy> {
+  const pdfjsLib = await getPdfJs();
   const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
   return await loadingTask.promise;
 }
@@ -49,7 +56,7 @@ function detectFontMetadata(
 }
 
 export async function renderPageAndExtractText(
-  pdfDoc: pdfjsLib.PDFDocumentProxy,
+  pdfDoc: PDFDocumentProxy,
   pageNumber: number,
   canvas: HTMLCanvasElement,
   scale: number = 1.5

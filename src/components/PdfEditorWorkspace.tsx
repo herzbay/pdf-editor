@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
-import * as pdfjsLib from 'pdfjs-dist';
+import type { PDFDocumentProxy } from 'pdfjs-dist';
 import {
   Download,
   ZoomIn,
@@ -49,14 +49,84 @@ function getCssFontFamily(family: DetectedFontFamily): string {
   return 'Arial, Helvetica, sans-serif';
 }
 
+// Helper membaca offset karakter (start & end) di dalam elemen contentEditable
+function getSelectionOffsets(root: HTMLElement): { start: number; end: number } {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) return { start: 0, end: 0 };
+
+  const range = selection.getRangeAt(0);
+  if (!root.contains(range.commonAncestorContainer)) {
+    return { start: 0, end: 0 };
+  }
+
+  const preStartRange = range.cloneRange();
+  preStartRange.selectNodeContents(root);
+  preStartRange.setEnd(range.startContainer, range.startOffset);
+  const start = preStartRange.toString().length;
+
+  const preEndRange = range.cloneRange();
+  preEndRange.selectNodeContents(root);
+  preEndRange.setEnd(range.endContainer, range.endOffset);
+  const end = preEndRange.toString().length;
+
+  return { start, end };
+}
+
+// Helper mengembalikan posisi kursor atau blok seleksi ke offset karakter tertentu
+function restoreSelectionOffsets(root: HTMLElement, start: number, end: number) {
+  const selection = window.getSelection();
+  if (!selection) return;
+
+  const range = document.createRange();
+  let charIndex = 0;
+  let startNode: Node | null = null;
+  let startOffset = 0;
+  let endNode: Node | null = null;
+  let endOffset = 0;
+
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+  let currentNode = walker.nextNode();
+
+  while (currentNode) {
+    const textLen = currentNode.textContent?.length || 0;
+    const nextCharIndex = charIndex + textLen;
+
+    if (!startNode && start >= charIndex && start <= nextCharIndex) {
+      startNode = currentNode;
+      startOffset = start - charIndex;
+    }
+    if (!endNode && end >= charIndex && end <= nextCharIndex) {
+      endNode = currentNode;
+      endOffset = end - charIndex;
+    }
+
+    charIndex = nextCharIndex;
+    currentNode = walker.nextNode();
+  }
+
+  if (startNode && endNode) {
+    range.setStart(startNode, startOffset);
+    range.setEnd(endNode, endOffset);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  } else {
+    // Fallback: letakkan kursor di paling akhir teks
+    range.selectNodeContents(root);
+    range.collapse(false);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+}
+
 export default function PdfEditorWorkspace({
   file,
   onResetFile,
 }: PdfEditorWorkspaceProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const inputRef = useRef<HTMLInputElement | null>(null);
+  const editableRef = useRef<HTMLDivElement | null>(null);
+  const pendingSelectionRef = useRef<{ start: number; end: number } | null>(null);
 
-  const [pdfDoc, setPdfDoc] = useState<pdfjsLib.PDFDocumentProxy | null>(null);
+  const [pdfDoc, setPdfDoc] = useState<PDFDocumentProxy | null>(null);
   const [originalBuffer, setOriginalBuffer] = useState<ArrayBuffer | null>(null);
   const [numPages, setNumPages] = useState<number>(0);
   const [currentPage, setCurrentPage] = useState<number>(1);
@@ -143,32 +213,51 @@ export default function PdfEditorWorkspace({
   const currentOverlays = pagesOverlays[currentPage] || [];
   const activeItem = currentOverlays.find((item) => item.id === activeItemId) || null;
 
-  // Sinkronkan posisi seleksi kursor/blok dari elemen <input>
+  // Kembalikan fokus & posisi kursor yang tepat setelah React me-render ulang segmen contentEditable
+  useEffect(() => {
+    if (activeItemId && editableRef.current) {
+      editableRef.current.focus();
+      if (pendingSelectionRef.current) {
+        restoreSelectionOffsets(
+          editableRef.current,
+          pendingSelectionRef.current.start,
+          pendingSelectionRef.current.end
+        );
+        pendingSelectionRef.current = null;
+      }
+    }
+  }, [activeItemId, pagesOverlays]);
+
   const syncSelection = () => {
-    if (!inputRef.current) return;
-    setSelectionRange({
-      start: inputRef.current.selectionStart ?? 0,
-      end: inputRef.current.selectionEnd ?? 0,
-    });
+    if (!editableRef.current) return;
+    const offsets = getSelectionOffsets(editableRef.current);
+    setSelectionRange(offsets);
   };
 
-  // Ubah teks saat user mengetik
-  const handleTextChange = (id: string, newText: string) => {
+  // Tangani ketikan langsung di dalam contentEditable
+  const handleEditableInput = (id: string) => {
+    if (!editableRef.current) return;
+    const currentOffsets = getSelectionOffsets(editableRef.current);
+    // Hapus karakter newline jika user tidak sengaja paste multi-baris
+    const rawText = (editableRef.current.textContent || '').replace(/\r?\n/g, ' ');
+
+    pendingSelectionRef.current = currentOffsets;
+    setSelectionRange(currentOffsets);
+
     setPagesOverlays((prev) => ({
       ...prev,
       [currentPage]: prev[currentPage].map((item) => {
         if (item.id !== id) return item;
         return {
           ...item,
-          segments: updateSegmentsText(item.segments, newText),
+          segments: updateSegmentsText(item.segments, rawText),
           isEdited: true,
         };
       }),
     }));
-    requestAnimationFrame(syncSelection);
   };
 
-  // Terapkan perubahan gaya HANYA pada teks yang diblok (atau seluruh baris jika tidak ada blok)
+  // Terapkan perubahan gaya HANYA pada teks yang diblok
   const handleApplyStyleToSelection = (
     stylePatch:
       | Partial<Omit<TextSegment, 'text'>>
@@ -176,6 +265,7 @@ export default function PdfEditorWorkspace({
   ) => {
     if (!activeItem) return;
     const { start, end } = selectionRange;
+    pendingSelectionRef.current = { start, end };
 
     setPagesOverlays((prev) => ({
       ...prev,
@@ -188,14 +278,6 @@ export default function PdfEditorWorkspace({
         };
       }),
     }));
-
-    // Kembalikan fokus & blok seleksi ke <input> agar user bisa mengklik gaya lain secara beruntun
-    requestAnimationFrame(() => {
-      if (inputRef.current) {
-        inputRef.current.focus();
-        inputRef.current.setSelectionRange(start, end);
-      }
-    });
   };
 
   const handleResetPage = () => {
@@ -237,7 +319,6 @@ export default function PdfEditorWorkspace({
     .flat()
     .filter((i) => i.isEdited).length;
 
-  // Gaya aktif pada posisi blok/kursor saat ini untuk indikator tombol Toolbar
   const activeStyle = activeItem
     ? getStyleAtSelection(activeItem.segments, selectionRange.start, selectionRange.end)
     : null;
@@ -344,7 +425,7 @@ export default function PdfEditorWorkspace({
 
       {/* Text Formatting Toolbar */}
       <div
-        onMouseDown={(e) => e.preventDefault()} // Mencegah fokus & seleksi teks di input hilang saat klik tombol toolbar
+        onMouseDown={(e) => e.preventDefault()}
         onClick={(e) => e.stopPropagation()}
         className="bg-white border-b border-slate-200 px-4 py-2 flex flex-wrap items-center justify-center gap-3 z-20 min-h-[46px]"
       >
@@ -500,11 +581,29 @@ export default function PdfEditorWorkspace({
                 item.backgroundColor.g * 255
               )}, ${Math.round(item.backgroundColor.b * 255)})`;
 
-              const fullText = item.segments.map((s) => s.text).join('');
-              const maxFontSize = Math.max(
-                ...item.segments.map((s) => s.fontSize * scale),
-                item.fontSize * scale
-              );
+              const renderSegments = () =>
+                item.segments.map((seg, idx) => {
+                  const textRgb = `rgb(${Math.round(
+                    seg.textColor.r * 255
+                  )}, ${Math.round(seg.textColor.g * 255)}, ${Math.round(
+                    seg.textColor.b * 255
+                  )})`;
+                  return (
+                    <span
+                      key={`${idx}-${seg.isBold}-${seg.isItalic}-${seg.fontFamily}-${seg.fontSize}`}
+                      style={{
+                        fontFamily: getCssFontFamily(seg.fontFamily),
+                        fontWeight: seg.isBold ? 'bold' : 'normal',
+                        fontStyle: seg.isItalic ? 'italic' : 'normal',
+                        fontSize: `${seg.fontSize * scale}px`,
+                        color: textRgb,
+                        lineHeight: 1,
+                      }}
+                    >
+                      {seg.text}
+                    </span>
+                  );
+                });
 
               return (
                 <div
@@ -513,7 +612,9 @@ export default function PdfEditorWorkspace({
                     e.stopPropagation();
                     if (activeItemId !== item.id) {
                       setActiveItemId(item.id);
-                      setSelectionRange({ start: 0, end: 0 });
+                      const fullLen = item.segments.reduce((acc, s) => acc + s.text.length, 0);
+                      pendingSelectionRef.current = { start: fullLen, end: fullLen };
+                      setSelectionRange({ start: fullLen, end: fullLen });
                     }
                   }}
                   style={{
@@ -526,66 +627,31 @@ export default function PdfEditorWorkspace({
                   }}
                   className={`group cursor-text flex items-center transition-colors ${
                     isSelected
-                      ? 'ring-2 ring-red-700 z-20'
+                      ? 'ring-2 ring-red-700 z-20 pr-1'
                       : item.isEdited
                       ? 'ring-1 ring-red-300 z-10'
                       : 'hover:ring-1 hover:ring-red-500 hover:bg-red-500/10'
                   }`}
                 >
                   {isSelected ? (
-                    <div className="relative inline-flex items-center">
-                      {/* Visual Rich-Text Segments di bawah input */}
-                      <div
-                        aria-hidden="true"
-                        className="whitespace-pre pointer-events-none select-none flex items-baseline"
-                        style={{ lineHeight: 1 }}
-                      >
-                        {item.segments.map((seg, idx) => {
-                          const textRgb = `rgb(${Math.round(
-                            seg.textColor.r * 255
-                          )}, ${Math.round(seg.textColor.g * 255)}, ${Math.round(
-                            seg.textColor.b * 255
-                          )})`;
-                          return (
-                            <span
-                              key={idx}
-                              style={{
-                                fontFamily: getCssFontFamily(seg.fontFamily),
-                                fontWeight: seg.isBold ? 'bold' : 'normal',
-                                fontStyle: seg.isItalic ? 'italic' : 'normal',
-                                fontSize: `${seg.fontSize * scale}px`,
-                                color: textRgb,
-                                lineHeight: 1,
-                              }}
-                            >
-                              {seg.text}
-                            </span>
-                          );
-                        })}
-                      </div>
-
-                      {/* Input Transparan untuk Mengetik & Memblok Teks */}
-                      <input
-                        ref={inputRef}
-                        type="text"
-                        autoFocus
-                        value={fullText}
-                        onChange={(e) => handleTextChange(item.id, e.target.value)}
-                        onSelect={syncSelection}
-                        onKeyUp={syncSelection}
-                        onMouseUp={syncSelection}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' || e.key === 'Escape') {
-                            setActiveItemId(null);
-                          }
-                        }}
-                        style={{
-                          fontFamily: getCssFontFamily(item.fontFamily),
-                          fontSize: `${maxFontSize}px`,
-                          lineHeight: 1,
-                        }}
-                        className="absolute inset-0 w-full h-full bg-transparent text-transparent caret-red-700 selection:bg-red-600/25 outline-none border-none p-0 m-0"
-                      />
+                    <div
+                      ref={editableRef}
+                      contentEditable
+                      suppressContentEditableWarning
+                      onInput={() => handleEditableInput(item.id)}
+                      onSelect={syncSelection}
+                      onKeyUp={syncSelection}
+                      onMouseUp={syncSelection}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === 'Escape') {
+                          e.preventDefault();
+                          setActiveItemId(null);
+                        }
+                      }}
+                      style={{ lineHeight: 1 }}
+                      className="whitespace-pre outline-none border-none caret-red-700 selection:bg-red-600/25 flex items-baseline min-w-[12px]"
+                    >
+                      {renderSegments()}
                     </div>
                   ) : (
                     item.isEdited && (
@@ -593,28 +659,7 @@ export default function PdfEditorWorkspace({
                         className="whitespace-pre flex items-baseline"
                         style={{ lineHeight: 1 }}
                       >
-                        {item.segments.map((seg, idx) => {
-                          const textRgb = `rgb(${Math.round(
-                            seg.textColor.r * 255
-                          )}, ${Math.round(seg.textColor.g * 255)}, ${Math.round(
-                            seg.textColor.b * 255
-                          )})`;
-                          return (
-                            <span
-                              key={idx}
-                              style={{
-                                fontFamily: getCssFontFamily(seg.fontFamily),
-                                fontWeight: seg.isBold ? 'bold' : 'normal',
-                                fontStyle: seg.isItalic ? 'italic' : 'normal',
-                                fontSize: `${seg.fontSize * scale}px`,
-                                color: textRgb,
-                                lineHeight: 1,
-                              }}
-                            >
-                              {seg.text}
-                            </span>
-                          );
-                        })}
+                        {renderSegments()}
                       </div>
                     )
                   )}
