@@ -18,9 +18,18 @@ import {
   Plus,
   Type,
 } from 'lucide-react';
-import { DetectedFontFamily, TextItemOverlay } from '@/types/pdf';
+import {
+  DetectedFontFamily,
+  TextItemOverlay,
+  TextSegment,
+} from '@/types/pdf';
 import { loadPdfDocument, renderPageAndExtractText } from '@/lib/pdfParser';
 import { exportEditedPdf } from '@/lib/pdfExporter';
+import {
+  applyStyleToRange,
+  getStyleAtSelection,
+  updateSegmentsText,
+} from '@/lib/segmentUtils';
 
 interface PdfEditorWorkspaceProps {
   file: File;
@@ -34,11 +43,18 @@ const TEXT_COLORS = [
   { label: 'Merah Tua', value: { r: 0.72, g: 0.11, b: 0.11 }, hex: '#B91C1C' },
 ];
 
+function getCssFontFamily(family: DetectedFontFamily): string {
+  if (family === 'serif') return '"Times New Roman", Times, Georgia, serif';
+  if (family === 'mono') return '"Courier New", Courier, monospace';
+  return 'Arial, Helvetica, sans-serif';
+}
+
 export default function PdfEditorWorkspace({
   file,
   onResetFile,
 }: PdfEditorWorkspaceProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
 
   const [pdfDoc, setPdfDoc] = useState<pdfjsLib.PDFDocumentProxy | null>(null);
   const [originalBuffer, setOriginalBuffer] = useState<ArrayBuffer | null>(null);
@@ -48,6 +64,11 @@ export default function PdfEditorWorkspace({
 
   const [pagesOverlays, setPagesOverlays] = useState<Record<number, TextItemOverlay[]>>({});
   const [activeItemId, setActiveItemId] = useState<string | null>(null);
+  const [selectionRange, setSelectionRange] = useState<{ start: number; end: number }>({
+    start: 0,
+    end: 0,
+  });
+
   const [isRendering, setIsRendering] = useState<boolean>(false);
   const [isExporting, setIsExporting] = useState<boolean>(false);
 
@@ -97,12 +118,7 @@ export default function PdfEditorWorkspace({
               if (oldItem && oldItem.isEdited) {
                 return {
                   ...newItem,
-                  currentText: oldItem.currentText,
-                  fontFamily: oldItem.fontFamily,
-                  isBold: oldItem.isBold,
-                  isItalic: oldItem.isItalic,
-                  fontSize: oldItem.fontSize,
-                  textColor: oldItem.textColor,
+                  segments: oldItem.segments,
                   isEdited: true,
                 };
               }
@@ -127,31 +143,63 @@ export default function PdfEditorWorkspace({
   const currentOverlays = pagesOverlays[currentPage] || [];
   const activeItem = currentOverlays.find((item) => item.id === activeItemId) || null;
 
-  // Helper generik untuk memperbarui properti teks atau gaya pada item aktif
-  const updateItem = (id: string, updates: Partial<TextItemOverlay>) => {
+  // Sinkronkan posisi seleksi kursor/blok dari elemen <input>
+  const syncSelection = () => {
+    if (!inputRef.current) return;
+    setSelectionRange({
+      start: inputRef.current.selectionStart ?? 0,
+      end: inputRef.current.selectionEnd ?? 0,
+    });
+  };
+
+  // Ubah teks saat user mengetik
+  const handleTextChange = (id: string, newText: string) => {
     setPagesOverlays((prev) => ({
       ...prev,
       [currentPage]: prev[currentPage].map((item) => {
         if (item.id !== id) return item;
-        const updated = { ...item, ...updates };
-        // Tandai sebagai isEdited jika teks berubah ATAU ada properti gaya yang diubah manual
         return {
-          ...updated,
+          ...item,
+          segments: updateSegmentsText(item.segments, newText),
           isEdited: true,
         };
       }),
     }));
+    requestAnimationFrame(syncSelection);
+  };
+
+  // Terapkan perubahan gaya HANYA pada teks yang diblok (atau seluruh baris jika tidak ada blok)
+  const handleApplyStyleToSelection = (
+    stylePatch:
+      | Partial<Omit<TextSegment, 'text'>>
+      | ((seg: TextSegment) => Partial<Omit<TextSegment, 'text'>>)
+  ) => {
+    if (!activeItem) return;
+    const { start, end } = selectionRange;
+
+    setPagesOverlays((prev) => ({
+      ...prev,
+      [currentPage]: prev[currentPage].map((item) => {
+        if (item.id !== activeItem.id) return item;
+        return {
+          ...item,
+          segments: applyStyleToRange(item.segments, start, end, stylePatch),
+          isEdited: true,
+        };
+      }),
+    }));
+
+    // Kembalikan fokus & blok seleksi ke <input> agar user bisa mengklik gaya lain secara beruntun
+    requestAnimationFrame(() => {
+      if (inputRef.current) {
+        inputRef.current.focus();
+        inputRef.current.setSelectionRange(start, end);
+      }
+    });
   };
 
   const handleResetPage = () => {
-    // Re-render ulang halaman agar gaya & teks kembali ke kondisi awal ekstraksi
-    setPagesOverlays((prev) => {
-      const copy = { ...prev };
-      delete copy[currentPage];
-      return copy;
-    });
     setActiveItemId(null);
-    // Trigger re-render dengan sedikit menggeser state atau memanggil ulang parser
     if (pdfDoc && canvasRef.current) {
       renderPageAndExtractText(pdfDoc, currentPage, canvasRef.current, scale).then(
         (freshOverlays) => {
@@ -188,6 +236,13 @@ export default function PdfEditorWorkspace({
   const editedCount = Object.values(pagesOverlays)
     .flat()
     .filter((i) => i.isEdited).length;
+
+  // Gaya aktif pada posisi blok/kursor saat ini untuk indikator tombol Toolbar
+  const activeStyle = activeItem
+    ? getStyleAtSelection(activeItem.segments, selectionRange.start, selectionRange.end)
+    : null;
+
+  const hasTextSelection = selectionRange.start !== selectionRange.end;
 
   return (
     <div className="flex flex-col h-screen bg-slate-100">
@@ -287,20 +342,25 @@ export default function PdfEditorWorkspace({
         </div>
       </header>
 
-      {/* Text Formatting Toolbar (Muncul interaktif saat ada kotak teks yang dipilih) */}
+      {/* Text Formatting Toolbar */}
       <div
+        onMouseDown={(e) => e.preventDefault()} // Mencegah fokus & seleksi teks di input hilang saat klik tombol toolbar
         onClick={(e) => e.stopPropagation()}
         className="bg-white border-b border-slate-200 px-4 py-2 flex flex-wrap items-center justify-center gap-3 z-20 min-h-[46px]"
       >
-        {activeItem ? (
+        {activeItem && activeStyle ? (
           <>
+            <span className="text-[11px] font-semibold px-2 py-0.5 rounded bg-red-50 text-red-800 border border-red-200">
+              {hasTextSelection ? 'Target: Teks Diblok' : 'Target: Seluruh Baris'}
+            </span>
+
             {/* Pilihan Keluarga Font */}
             <div className="flex items-center gap-1.5">
               <Type className="w-4 h-4 text-slate-500" />
               <select
-                value={activeItem.fontFamily}
+                value={activeStyle.fontFamily}
                 onChange={(e) =>
-                  updateItem(activeItem.id, {
+                  handleApplyStyleToSelection({
                     fontFamily: e.target.value as DetectedFontFamily,
                   })
                 }
@@ -319,9 +379,9 @@ export default function PdfEditorWorkspace({
               <button
                 type="button"
                 onClick={() =>
-                  updateItem(activeItem.id, {
-                    fontSize: Math.max(6, Number((activeItem.fontSize - 0.5).toFixed(1))),
-                  })
+                  handleApplyStyleToSelection((seg) => ({
+                    fontSize: Math.max(6, Number((seg.fontSize - 0.5).toFixed(1))),
+                  }))
                 }
                 className="p-1 hover:bg-white hover:text-red-700 rounded transition"
                 title="Perkecil Ukuran Font"
@@ -329,14 +389,14 @@ export default function PdfEditorWorkspace({
                 <Minus className="w-3.5 h-3.5" />
               </button>
               <span className="text-xs font-semibold text-slate-700 px-1.5 min-w-[36px] text-center">
-                {Math.round(activeItem.fontSize)} pt
+                {Math.round(activeStyle.fontSize)} pt
               </span>
               <button
                 type="button"
                 onClick={() =>
-                  updateItem(activeItem.id, {
-                    fontSize: Math.min(72, Number((activeItem.fontSize + 0.5).toFixed(1))),
-                  })
+                  handleApplyStyleToSelection((seg) => ({
+                    fontSize: Math.min(72, Number((seg.fontSize + 0.5).toFixed(1))),
+                  }))
                 }
                 className="p-1 hover:bg-white hover:text-red-700 rounded transition"
                 title="Perbesar Ukuran Font"
@@ -352,14 +412,14 @@ export default function PdfEditorWorkspace({
               <button
                 type="button"
                 onClick={() =>
-                  updateItem(activeItem.id, { isBold: !activeItem.isBold })
+                  handleApplyStyleToSelection({ isBold: !activeStyle.isBold })
                 }
                 className={`p-1.5 rounded-md border transition ${
-                  activeItem.isBold
+                  activeStyle.isBold
                     ? 'bg-red-700 text-white border-red-700'
                     : 'bg-white text-slate-700 border-slate-300 hover:bg-red-50'
                 }`}
-                title="Tebal (Bold)"
+                title="Tebal (Bold) pada teks yang diblok"
               >
                 <Bold className="w-3.5 h-3.5" />
               </button>
@@ -367,14 +427,14 @@ export default function PdfEditorWorkspace({
               <button
                 type="button"
                 onClick={() =>
-                  updateItem(activeItem.id, { isItalic: !activeItem.isItalic })
+                  handleApplyStyleToSelection({ isItalic: !activeStyle.isItalic })
                 }
                 className={`p-1.5 rounded-md border transition ${
-                  activeItem.isItalic
+                  activeStyle.isItalic
                     ? 'bg-red-700 text-white border-red-700'
                     : 'bg-white text-slate-700 border-slate-300 hover:bg-red-50'
                 }`}
-                title="Miring (Italic)"
+                title="Miring (Italic) pada teks yang diblok"
               >
                 <Italic className="w-3.5 h-3.5" />
               </button>
@@ -386,16 +446,16 @@ export default function PdfEditorWorkspace({
             <div className="flex items-center gap-1.5">
               {TEXT_COLORS.map((color) => {
                 const isColorSelected =
-                  Math.abs(activeItem.textColor.r - color.value.r) < 0.05 &&
-                  Math.abs(activeItem.textColor.g - color.value.g) < 0.05 &&
-                  Math.abs(activeItem.textColor.b - color.value.b) < 0.05;
+                  Math.abs(activeStyle.textColor.r - color.value.r) < 0.05 &&
+                  Math.abs(activeStyle.textColor.g - color.value.g) < 0.05 &&
+                  Math.abs(activeStyle.textColor.b - color.value.b) < 0.05;
 
                 return (
                   <button
                     key={color.label}
                     type="button"
                     onClick={() =>
-                      updateItem(activeItem.id, { textColor: color.value })
+                      handleApplyStyleToSelection({ textColor: color.value })
                     }
                     style={{ backgroundColor: color.hex }}
                     className={`w-5 h-5 rounded-full border transition-transform ${
@@ -411,8 +471,8 @@ export default function PdfEditorWorkspace({
           </>
         ) : (
           <span className="text-xs text-red-900">
-            Klik langsung pada teks di dalam dokumen untuk mulai mengedit atau mengatur{' '}
-            <strong>Font, Bold, Italic, & Ukuran</strong>.
+            Klik teks untuk mengedit, lalu <strong>blok kata tertentu</strong> untuk mengatur{' '}
+            <strong>Bold, Italic, Font, & Ukuran</strong> secara terpisah.
           </span>
         )}
       </div>
@@ -440,25 +500,21 @@ export default function PdfEditorWorkspace({
                 item.backgroundColor.g * 255
               )}, ${Math.round(item.backgroundColor.b * 255)})`;
 
-              const textRgb = `rgb(${Math.round(item.textColor.r * 255)}, ${Math.round(
-                item.textColor.g * 255
-              )}, ${Math.round(item.textColor.b * 255)})`;
-
-              const cssFontFamily =
-                item.fontFamily === 'serif'
-                  ? '"Times New Roman", Times, Georgia, serif'
-                  : item.fontFamily === 'mono'
-                  ? '"Courier New", Courier, monospace'
-                  : 'Arial, Helvetica, sans-serif';
-
-              const computedFontSize = item.fontSize * scale;
+              const fullText = item.segments.map((s) => s.text).join('');
+              const maxFontSize = Math.max(
+                ...item.segments.map((s) => s.fontSize * scale),
+                item.fontSize * scale
+              );
 
               return (
                 <div
                   key={item.id}
                   onClick={(e) => {
                     e.stopPropagation();
-                    setActiveItemId(item.id);
+                    if (activeItemId !== item.id) {
+                      setActiveItemId(item.id);
+                      setSelectionRange({ start: 0, end: 0 });
+                    }
                   }}
                   style={{
                     position: 'absolute',
@@ -467,10 +523,6 @@ export default function PdfEditorWorkspace({
                     minWidth: `${item.screenRect.width + 4}px`,
                     height: `${item.screenRect.height}px`,
                     backgroundColor: item.isEdited || isSelected ? bgRgb : 'transparent',
-                    fontFamily: cssFontFamily,
-                    fontWeight: item.isBold ? 'bold' : 'normal',
-                    fontStyle: item.isItalic ? 'italic' : 'normal',
-                    color: textRgb,
                   }}
                   className={`group cursor-text flex items-center transition-colors ${
                     isSelected
@@ -481,47 +533,89 @@ export default function PdfEditorWorkspace({
                   }`}
                 >
                   {isSelected ? (
-                    <input
-                      type="text"
-                      autoFocus
-                      value={item.currentText}
-                      onChange={(e) =>
-                        updateItem(item.id, { currentText: e.target.value })
-                      }
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' || e.key === 'Escape') {
-                          setActiveItemId(null);
-                        }
-                      }}
-                      style={{
-                        fontFamily: cssFontFamily,
-                        fontWeight: item.isBold ? 'bold' : 'normal',
-                        fontStyle: item.isItalic ? 'italic' : 'normal',
-                        fontSize: `${computedFontSize}px`,
-                        color: textRgb,
-                        lineHeight: 1,
-                        width: `${Math.max(
-                          item.screenRect.width + 24,
-                          item.currentText.length * (computedFontSize * 0.55)
-                        )}px`,
-                      }}
-                      className="bg-transparent outline-none border-none p-0 m-0"
-                    />
-                  ) : (
-                    item.isEdited && (
-                      <span
+                    <div className="relative inline-flex items-center">
+                      {/* Visual Rich-Text Segments di bawah input */}
+                      <div
+                        aria-hidden="true"
+                        className="whitespace-pre pointer-events-none select-none flex items-baseline"
+                        style={{ lineHeight: 1 }}
+                      >
+                        {item.segments.map((seg, idx) => {
+                          const textRgb = `rgb(${Math.round(
+                            seg.textColor.r * 255
+                          )}, ${Math.round(seg.textColor.g * 255)}, ${Math.round(
+                            seg.textColor.b * 255
+                          )})`;
+                          return (
+                            <span
+                              key={idx}
+                              style={{
+                                fontFamily: getCssFontFamily(seg.fontFamily),
+                                fontWeight: seg.isBold ? 'bold' : 'normal',
+                                fontStyle: seg.isItalic ? 'italic' : 'normal',
+                                fontSize: `${seg.fontSize * scale}px`,
+                                color: textRgb,
+                                lineHeight: 1,
+                              }}
+                            >
+                              {seg.text}
+                            </span>
+                          );
+                        })}
+                      </div>
+
+                      {/* Input Transparan untuk Mengetik & Memblok Teks */}
+                      <input
+                        ref={inputRef}
+                        type="text"
+                        autoFocus
+                        value={fullText}
+                        onChange={(e) => handleTextChange(item.id, e.target.value)}
+                        onSelect={syncSelection}
+                        onKeyUp={syncSelection}
+                        onMouseUp={syncSelection}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === 'Escape') {
+                            setActiveItemId(null);
+                          }
+                        }}
                         style={{
-                          fontFamily: cssFontFamily,
-                          fontWeight: item.isBold ? 'bold' : 'normal',
-                          fontStyle: item.isItalic ? 'italic' : 'normal',
-                          fontSize: `${computedFontSize}px`,
-                          color: textRgb,
+                          fontFamily: getCssFontFamily(item.fontFamily),
+                          fontSize: `${maxFontSize}px`,
                           lineHeight: 1,
                         }}
-                        className="whitespace-nowrap block"
+                        className="absolute inset-0 w-full h-full bg-transparent text-transparent caret-red-700 selection:bg-red-600/25 outline-none border-none p-0 m-0"
+                      />
+                    </div>
+                  ) : (
+                    item.isEdited && (
+                      <div
+                        className="whitespace-pre flex items-baseline"
+                        style={{ lineHeight: 1 }}
                       >
-                        {item.currentText}
-                      </span>
+                        {item.segments.map((seg, idx) => {
+                          const textRgb = `rgb(${Math.round(
+                            seg.textColor.r * 255
+                          )}, ${Math.round(seg.textColor.g * 255)}, ${Math.round(
+                            seg.textColor.b * 255
+                          )})`;
+                          return (
+                            <span
+                              key={idx}
+                              style={{
+                                fontFamily: getCssFontFamily(seg.fontFamily),
+                                fontWeight: seg.isBold ? 'bold' : 'normal',
+                                fontStyle: seg.isItalic ? 'italic' : 'normal',
+                                fontSize: `${seg.fontSize * scale}px`,
+                                color: textRgb,
+                                lineHeight: 1,
+                              }}
+                            >
+                              {seg.text}
+                            </span>
+                          );
+                        })}
+                      </div>
                     )
                   )}
                 </div>
