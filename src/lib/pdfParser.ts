@@ -59,10 +59,12 @@ export async function renderPageAndExtractText(
   pdfDoc: PDFDocumentProxy,
   pageNumber: number,
   canvas: HTMLCanvasElement,
-  scale: number = 1.5
+  scale: number = 1.5,
+  rotationOffset: number = 0
 ): Promise<TextItemOverlay[]> {
   const page = await pdfDoc.getPage(pageNumber);
-  const viewport = page.getViewport({ scale });
+  const totalRotation = (page.rotate + rotationOffset) % 360;
+  const viewport = page.getViewport({ scale, rotation: totalRotation });
 
   const context = canvas.getContext('2d', { willReadFrequently: true });
   if (!context) throw new Error('Canvas context tidak tersedia');

@@ -1,12 +1,23 @@
-import { PDFDocument, rgb, StandardFonts, PDFFont } from 'pdf-lib';
+import { PDFDocument, rgb, StandardFonts, PDFFont, degrees } from 'pdf-lib';
 import { TextItemOverlay } from '@/types/pdf';
 
 export async function exportEditedPdf(
   originalArrayBuffer: ArrayBuffer,
-  editedItems: TextItemOverlay[]
+  editedItems: TextItemOverlay[],
+  pageRotations: Record<number, number> = {}
 ): Promise<Uint8Array> {
   const pdfDoc = await PDFDocument.load(originalArrayBuffer);
   const pages = pdfDoc.getPages();
+
+  // Terapkan rotasi halaman jika user memutar halaman tertentu
+  Object.entries(pageRotations).forEach(([pageNumStr, offsetDeg]) => {
+    const pageIndex = Number(pageNumStr) - 1;
+    const page = pages[pageIndex];
+    if (page && offsetDeg % 360 !== 0) {
+      const currentAngle = page.getRotation().angle;
+      page.setRotation(degrees((currentAngle + offsetDeg) % 360));
+    }
+  });
 
   const fonts: Record<string, PDFFont> = {
     'sans-normal': await pdfDoc.embedFont(StandardFonts.Helvetica),
@@ -34,7 +45,6 @@ export async function exportEditedPdf(
     const { x, y, width, height } = item.pdfRect;
     const { r, g, b } = item.backgroundColor;
 
-    // 1. Tutup seluruh area teks asli dengan smart background color
     page.drawRectangle({
       x: x - 1,
       y: y - height * 0.25,
@@ -43,7 +53,6 @@ export async function exportEditedPdf(
       color: rgb(r, g, b),
     });
 
-    // 2. Gambar tiap segmen secara berurutan dari kiri ke kanan
     let currentX = x;
 
     for (const seg of item.segments) {
@@ -65,7 +74,6 @@ export async function exportEditedPdf(
         color: rgb(seg.textColor.r, seg.textColor.g, seg.textColor.b),
       });
 
-      // Geser posisi X sesuai lebar presisi segmen ini di PDF
       const segWidth = selectedFont.widthOfTextAtSize(seg.text, seg.fontSize);
       currentX += segWidth;
     }

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import {
   Download,
@@ -9,9 +9,12 @@ import {
   ChevronLeft,
   ChevronRight,
   RotateCcw,
+  RotateCw,
+  Undo2,
+  Redo2,
+  Maximize2,
   FilePlus2,
   Loader2,
-  ShieldCheck,
   Bold,
   Italic,
   Minus,
@@ -36,6 +39,11 @@ interface PdfEditorWorkspaceProps {
   onResetFile: () => void;
 }
 
+interface EditorSnapshot {
+  pagesOverlays: Record<number, TextItemOverlay[]>;
+  pageRotations: Record<number, number>;
+}
+
 const TEXT_COLORS = [
   { label: 'Hitam', value: { r: 0, g: 0, b: 0 }, hex: '#000000' },
   { label: 'Abu Gelap', value: { r: 0.25, g: 0.25, b: 0.25 }, hex: '#404040' },
@@ -49,7 +57,6 @@ function getCssFontFamily(family: DetectedFontFamily): string {
   return 'Arial, Helvetica, sans-serif';
 }
 
-// Helper membaca offset karakter (start & end) di dalam elemen contentEditable
 function getSelectionOffsets(root: HTMLElement): { start: number; end: number } {
   const selection = window.getSelection();
   if (!selection || selection.rangeCount === 0) return { start: 0, end: 0 };
@@ -72,7 +79,6 @@ function getSelectionOffsets(root: HTMLElement): { start: number; end: number } 
   return { start, end };
 }
 
-// Helper mengembalikan posisi kursor atau blok seleksi ke offset karakter tertentu
 function restoreSelectionOffsets(root: HTMLElement, start: number, end: number) {
   const selection = window.getSelection();
   if (!selection) return;
@@ -110,7 +116,6 @@ function restoreSelectionOffsets(root: HTMLElement, start: number, end: number) 
     selection.removeAllRanges();
     selection.addRange(range);
   } else {
-    // Fallback: letakkan kursor di paling akhir teks
     range.selectNodeContents(root);
     range.collapse(false);
     selection.removeAllRanges();
@@ -118,11 +123,28 @@ function restoreSelectionOffsets(root: HTMLElement, start: number, end: number) 
   }
 }
 
+function cloneOverlaysMap(
+  map: Record<number, TextItemOverlay[]>
+): Record<number, TextItemOverlay[]> {
+  const cloned: Record<number, TextItemOverlay[]> = {};
+  for (const [pageKey, items] of Object.entries(map)) {
+    cloned[Number(pageKey)] = items.map((item) => ({
+      ...item,
+      segments: item.segments.map((seg) => ({
+        ...seg,
+        textColor: { ...seg.textColor },
+      })),
+    }));
+  }
+  return cloned;
+}
+
 export default function PdfEditorWorkspace({
   file,
   onResetFile,
 }: PdfEditorWorkspaceProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const mainContainerRef = useRef<HTMLElement | null>(null);
   const editableRef = useRef<HTMLDivElement | null>(null);
   const pendingSelectionRef = useRef<{ start: number; end: number } | null>(null);
 
@@ -130,9 +152,16 @@ export default function PdfEditorWorkspace({
   const [originalBuffer, setOriginalBuffer] = useState<ArrayBuffer | null>(null);
   const [numPages, setNumPages] = useState<number>(0);
   const [currentPage, setCurrentPage] = useState<number>(1);
-  const [scale, setScale] = useState<number>(1.5);
+  const [pageInput, setPageInput] = useState<string>('1');
+  const [scale, setScale] = useState<number>(1.35);
 
   const [pagesOverlays, setPagesOverlays] = useState<Record<number, TextItemOverlay[]>>({});
+  const [pageRotations, setPageRotations] = useState<Record<number, number>>({});
+
+  // Undo & Redo History Stacks
+  const [pastHistory, setPastHistory] = useState<EditorSnapshot[]>([]);
+  const [futureHistory, setFutureHistory] = useState<EditorSnapshot[]>([]);
+
   const [activeItemId, setActiveItemId] = useState<string | null>(null);
   const [selectionRange, setSelectionRange] = useState<{ start: number; end: number }>({
     start: 0,
@@ -141,6 +170,11 @@ export default function PdfEditorWorkspace({
 
   const [isRendering, setIsRendering] = useState<boolean>(false);
   const [isExporting, setIsExporting] = useState<boolean>(false);
+
+  // Sinkronkan input teks halaman setiap kali currentPage berubah
+  useEffect(() => {
+    setPageInput(String(currentPage));
+  }, [currentPage]);
 
   useEffect(() => {
     let isMounted = true;
@@ -155,6 +189,9 @@ export default function PdfEditorWorkspace({
         setPdfDoc(doc);
         setNumPages(doc.numPages);
         setCurrentPage(1);
+        setPastHistory([]);
+        setFutureHistory([]);
+        setPageRotations({});
       }
     }
     initPdf();
@@ -162,6 +199,8 @@ export default function PdfEditorWorkspace({
       isMounted = false;
     };
   }, [file]);
+
+  const currentRotation = pageRotations[currentPage] || 0;
 
   useEffect(() => {
     if (!pdfDoc || !canvasRef.current) return;
@@ -174,7 +213,8 @@ export default function PdfEditorWorkspace({
           pdfDoc!,
           currentPage,
           canvasRef.current!,
-          scale
+          scale,
+          currentRotation
         );
 
         if (!isCancelled) {
@@ -208,12 +248,112 @@ export default function PdfEditorWorkspace({
     return () => {
       isCancelled = true;
     };
-  }, [pdfDoc, currentPage, scale]);
+  }, [pdfDoc, currentPage, scale, currentRotation]);
+
+  // Simpan snapshot ke riwayat Undo sebelum melakukan perubahan baru
+  const pushHistory = useCallback(() => {
+    setPastHistory((prev) => [
+      ...prev.slice(-29), // Simpan hingga 30 langkah terakhir
+      {
+        pagesOverlays: cloneOverlaysMap(pagesOverlays),
+        pageRotations: { ...pageRotations },
+      },
+    ]);
+    setFutureHistory([]);
+  }, [pagesOverlays, pageRotations]);
+
+  // Undo: kembali ke perubahan sebelumnya
+  const handleUndo = useCallback(() => {
+    if (pastHistory.length === 0) return;
+    const previous = pastHistory[pastHistory.length - 1];
+    const currentSnapshot: EditorSnapshot = {
+      pagesOverlays: cloneOverlaysMap(pagesOverlays),
+      pageRotations: { ...pageRotations },
+    };
+
+    setPastHistory((prev) => prev.slice(0, -1));
+    setFutureHistory((prev) => [currentSnapshot, ...prev]);
+    setPagesOverlays(previous.pagesOverlays);
+    setPageRotations(previous.pageRotations);
+    setActiveItemId(null);
+  }, [pastHistory, pagesOverlays, pageRotations]);
+
+  // Redo: maju kembali ke perubahan setelahnya
+  const handleRedo = useCallback(() => {
+    if (futureHistory.length === 0) return;
+    const next = futureHistory[0];
+    const currentSnapshot: EditorSnapshot = {
+      pagesOverlays: cloneOverlaysMap(pagesOverlays),
+      pageRotations: { ...pageRotations },
+    };
+
+    setFutureHistory((prev) => prev.slice(1));
+    setPastHistory((prev) => [...prev, currentSnapshot]);
+    setPagesOverlays(next.pagesOverlays);
+    setPageRotations(next.pageRotations);
+    setActiveItemId(null);
+  }, [futureHistory, pagesOverlays, pageRotations]);
+
+  // Keyboard shortcut Ctrl+Z / Ctrl+Y saat tidak sedang mengetik di dalam kotak teks
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (activeItemId) return;
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) handleRedo();
+        else handleUndo();
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        handleRedo();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [activeItemId, handleUndo, handleRedo]);
+
+  // Fit to Page: sesuaikan skala otomatis agar seluruh halaman muat di layar
+  const handleFitToPage = async () => {
+    if (!pdfDoc || !mainContainerRef.current) return;
+    const page = await pdfDoc.getPage(currentPage);
+    const totalRotation = (page.rotate + currentRotation) % 360;
+    const unscaledViewport = page.getViewport({ scale: 1, rotation: totalRotation });
+
+    const containerWidth = mainContainerRef.current.clientWidth - 64;
+    const containerHeight = mainContainerRef.current.clientHeight - 64;
+
+    const scaleX = containerWidth / unscaledViewport.width;
+    const scaleY = containerHeight / unscaledViewport.height;
+    const optimalScale = Math.max(0.5, Math.min(scaleX, scaleY, 2.5));
+
+    setScale(Number(optimalScale.toFixed(2)));
+  };
+
+  // Rotate Page 90 derajat searah jarum jam
+  const handleRotatePage = () => {
+    pushHistory();
+    setActiveItemId(null);
+    setPageRotations((prev) => ({
+      ...prev,
+      [currentPage]: ((prev[currentPage] || 0) + 90) % 360,
+    }));
+  };
+
+  // Lompat ke nomor halaman yang diketik pengguna
+  const handlePageJumpSubmit = () => {
+    const parsed = parseInt(pageInput, 10);
+    if (!isNaN(parsed) && numPages > 0) {
+      const clamped = Math.min(Math.max(1, parsed), numPages);
+      setCurrentPage(clamped);
+      setPageInput(String(clamped));
+      setActiveItemId(null);
+    } else {
+      setPageInput(String(currentPage));
+    }
+  };
 
   const currentOverlays = pagesOverlays[currentPage] || [];
   const activeItem = currentOverlays.find((item) => item.id === activeItemId) || null;
 
-  // Kembalikan fokus & posisi kursor yang tepat setelah React me-render ulang segmen contentEditable
   useEffect(() => {
     if (activeItemId && editableRef.current) {
       editableRef.current.focus();
@@ -234,11 +374,11 @@ export default function PdfEditorWorkspace({
     setSelectionRange(offsets);
   };
 
-  // Tangani ketikan langsung di dalam contentEditable
   const handleEditableInput = (id: string) => {
     if (!editableRef.current) return;
+    pushHistory();
+
     const currentOffsets = getSelectionOffsets(editableRef.current);
-    // Hapus karakter newline jika user tidak sengaja paste multi-baris
     const rawText = (editableRef.current.textContent || '').replace(/\r?\n/g, ' ');
 
     pendingSelectionRef.current = currentOffsets;
@@ -257,13 +397,14 @@ export default function PdfEditorWorkspace({
     }));
   };
 
-  // Terapkan perubahan gaya HANYA pada teks yang diblok
   const handleApplyStyleToSelection = (
     stylePatch:
       | Partial<Omit<TextSegment, 'text'>>
       | ((seg: TextSegment) => Partial<Omit<TextSegment, 'text'>>)
   ) => {
     if (!activeItem) return;
+    pushHistory();
+
     const { start, end } = selectionRange;
     pendingSelectionRef.current = { start, end };
 
@@ -280,12 +421,15 @@ export default function PdfEditorWorkspace({
     }));
   };
 
-  const handleResetPage = () => {
+  // Reset semua perubahan ke kondisi awal
+  const handleResetAll = () => {
+    pushHistory();
     setActiveItemId(null);
+    setPageRotations({});
     if (pdfDoc && canvasRef.current) {
-      renderPageAndExtractText(pdfDoc, currentPage, canvasRef.current, scale).then(
+      renderPageAndExtractText(pdfDoc, currentPage, canvasRef.current, scale, 0).then(
         (freshOverlays) => {
-          setPagesOverlays((prev) => ({ ...prev, [currentPage]: freshOverlays }));
+          setPagesOverlays({ [currentPage]: freshOverlays });
         }
       );
     }
@@ -296,7 +440,11 @@ export default function PdfEditorWorkspace({
     setIsExporting(true);
     try {
       const allEditedItems = Object.values(pagesOverlays).flat();
-      const pdfBytes = await exportEditedPdf(originalBuffer, allEditedItems);
+      const pdfBytes = await exportEditedPdf(
+        originalBuffer,
+        allEditedItems,
+        pageRotations
+      );
 
       const blob = new Blob([pdfBytes], { type: 'application/pdf' });
       const url = URL.createObjectURL(blob);
@@ -328,8 +476,8 @@ export default function PdfEditorWorkspace({
   return (
     <div className="flex flex-col h-screen bg-slate-100">
       {/* Top Navbar */}
-      <header className="bg-white border-b border-red-100 px-4 py-2.5 flex flex-wrap items-center justify-between gap-4 shadow-xs z-30">
-        <div className="flex items-center gap-3">
+      <header className="bg-white border-b border-red-100 px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 shadow-xs z-30">
+        <div className="flex items-center gap-2.5">
           <div className="w-8 h-8 bg-red-700 rounded-lg flex items-center justify-center text-white font-bold text-[11px] tracking-wider shrink-0">
             PDF
           </div>
@@ -341,32 +489,57 @@ export default function PdfEditorWorkspace({
             Ganti File
           </button>
           <div className="h-5 w-[1px] bg-slate-200" />
-          <span className="text-sm font-semibold text-slate-800 truncate max-w-[180px]">
+          <span className="text-sm font-semibold text-slate-800 truncate max-w-[160px]">
             {file.name}
           </span>
           {editedCount > 0 && (
-            <span className="text-xs bg-red-100 text-red-800 px-2.5 py-0.5 rounded-full font-semibold">
-              {editedCount} bagian diubah
+            <span className="hidden sm:inline-block text-xs bg-red-100 text-red-800 px-2.5 py-0.5 rounded-full font-semibold">
+              {editedCount} diubah
             </span>
           )}
         </div>
 
-        {/* Kontrol Navigasi & Zoom */}
-        <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 p-1 rounded-lg">
+        {/* Kontrol Navigasi Halaman (Input Langsung), Zoom, Fit to Page & Rotate */}
+        <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 p-1 rounded-lg">
           <button
             disabled={currentPage <= 1}
-            onClick={() => setCurrentPage((p) => p - 1)}
+            onClick={() => {
+              setActiveItemId(null);
+              setCurrentPage((p) => p - 1);
+            }}
             className="p-1.5 rounded hover:bg-white hover:text-red-700 disabled:opacity-40 transition"
             title="Halaman Sebelumnya"
           >
             <ChevronLeft className="w-4 h-4" />
           </button>
-          <span className="text-xs font-semibold px-2 text-slate-700">
-            Hal {currentPage} / {numPages || 1}
-          </span>
+
+          {/* Input Nomor Halaman Langsung */}
+          <div className="flex items-center gap-1 px-1 text-xs font-semibold text-slate-700">
+            <span>Hal</span>
+            <input
+              type="text"
+              inputMode="numeric"
+              value={pageInput}
+              onChange={(e) => setPageInput(e.target.value.replace(/[^0-9]/g, ''))}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.currentTarget.blur();
+                  handlePageJumpSubmit();
+                }
+              }}
+              onBlur={handlePageJumpSubmit}
+              aria-label="Nomor Halaman"
+              className="w-10 text-center bg-white border border-slate-300 focus:border-red-700 focus:outline-none rounded py-0.5 text-xs font-bold text-slate-900"
+            />
+            <span>/ {numPages || 1}</span>
+          </div>
+
           <button
             disabled={currentPage >= numPages}
-            onClick={() => setCurrentPage((p) => p + 1)}
+            onClick={() => {
+              setActiveItemId(null);
+              setCurrentPage((p) => p + 1);
+            }}
             className="p-1.5 rounded hover:bg-white hover:text-red-700 disabled:opacity-40 transition"
             title="Halaman Berikutnya"
           >
@@ -375,43 +548,83 @@ export default function PdfEditorWorkspace({
 
           <div className="h-4 w-[1px] bg-slate-300 mx-1" />
 
+          {/* Zoom Controls */}
           <button
-            onClick={() => setScale((s) => Math.max(0.75, s - 0.25))}
+            onClick={() => setScale((s) => Math.max(0.5, Number((s - 0.25).toFixed(2))))}
             className="p-1.5 rounded hover:bg-white hover:text-red-700 transition"
             title="Perkecil (Zoom Out)"
           >
             <ZoomOut className="w-4 h-4" />
           </button>
-          <span className="text-xs font-semibold px-1.5 text-slate-700">
+          <span className="text-xs font-semibold px-1 text-slate-700 min-w-[42px] text-center">
             {Math.round(scale * 100)}%
           </span>
           <button
-            onClick={() => setScale((s) => Math.min(3, s + 0.25))}
+            onClick={() => setScale((s) => Math.min(3, Number((s + 0.25).toFixed(2))))}
             className="p-1.5 rounded hover:bg-white hover:text-red-700 transition"
             title="Perbesar (Zoom In)"
           >
             <ZoomIn className="w-4 h-4" />
           </button>
+
+          <div className="h-4 w-[1px] bg-slate-300 mx-1" />
+
+          {/* Fit to Page */}
+          <button
+            onClick={handleFitToPage}
+            className="flex items-center gap-1 px-2 py-1 rounded text-xs font-semibold text-slate-700 hover:bg-white hover:text-red-700 transition"
+            title="Sesuaikan Ukuran dengan Layar (Fit to Page)"
+          >
+            <Maximize2 className="w-3.5 h-3.5" />
+            <span className="hidden md:inline">Fit</span>
+          </button>
+
+          {/* Rotate Page */}
+          <button
+            onClick={handleRotatePage}
+            className="flex items-center gap-1 px-2 py-1 rounded text-xs font-semibold text-slate-700 hover:bg-white hover:text-red-700 transition"
+            title="Putar Halaman 90° Searah Jarum Jam"
+          >
+            <RotateCw className="w-3.5 h-3.5" />
+            <span className="hidden md:inline">Rotate</span>
+          </button>
         </div>
 
-        {/* Aksi Reset & Export */}
-        <div className="flex items-center gap-2">
-          <span className="hidden lg:inline-flex items-center gap-1 text-xs text-slate-500 mr-2">
-            <ShieldCheck className="w-4 h-4 text-red-700" />
-            Mode Lokal Aman
-          </span>
+        {/* Aksi Undo, Redo, Reset All & Export */}
+        <div className="flex items-center gap-1.5">
+          <div className="flex items-center bg-slate-50 border border-slate-200 p-0.5 rounded-lg mr-1">
+            <button
+              onClick={handleUndo}
+              disabled={pastHistory.length === 0}
+              className="p-1.5 rounded text-slate-700 hover:bg-white hover:text-red-700 disabled:opacity-35 transition"
+              title="Undo (Batalkan perubahan terakhir)"
+            >
+              <Undo2 className="w-4 h-4" />
+            </button>
+            <button
+              onClick={handleRedo}
+              disabled={futureHistory.length === 0}
+              className="p-1.5 rounded text-slate-700 hover:bg-white hover:text-red-700 disabled:opacity-35 transition"
+              title="Redo (Kembalikan perubahan yang dibatalkan)"
+            >
+              <Redo2 className="w-4 h-4" />
+            </button>
+          </div>
+
           <button
-            onClick={handleResetPage}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-slate-700 hover:text-red-700 hover:bg-red-50 rounded-lg transition"
-            title="Kembalikan teks halaman ini ke semula"
+            onClick={handleResetAll}
+            disabled={editedCount === 0 && Object.keys(pageRotations).length === 0}
+            className="flex items-center gap-1 px-2.5 py-1.5 text-xs sm:text-sm font-medium text-slate-700 hover:text-red-700 hover:bg-red-50 disabled:opacity-40 rounded-lg transition"
+            title="Reset seluruh perubahan ke dokumen asli"
           >
             <RotateCcw className="w-4 h-4" />
-            Reset
+            <span className="hidden sm:inline">Reset</span>
           </button>
+
           <button
             onClick={handleExport}
             disabled={isExporting}
-            className="flex items-center gap-2 px-4 py-2 bg-red-700 hover:bg-red-800 text-white text-sm font-semibold rounded-lg shadow-sm disabled:opacity-50 transition"
+            className="flex items-center gap-2 px-4 py-2 bg-red-700 hover:bg-red-800 text-white text-xs sm:text-sm font-semibold rounded-lg shadow-sm disabled:opacity-50 transition"
           >
             {isExporting ? (
               <Loader2 className="w-4 h-4 animate-spin" />
@@ -560,6 +773,7 @@ export default function PdfEditorWorkspace({
 
       {/* Workspace Canvas Area */}
       <main
+        ref={mainContainerRef}
         className="flex-1 overflow-auto p-8 flex justify-center items-start"
         onClick={() => setActiveItemId(null)}
       >
@@ -612,7 +826,10 @@ export default function PdfEditorWorkspace({
                     e.stopPropagation();
                     if (activeItemId !== item.id) {
                       setActiveItemId(item.id);
-                      const fullLen = item.segments.reduce((acc, s) => acc + s.text.length, 0);
+                      const fullLen = item.segments.reduce(
+                        (acc, s) => acc + s.text.length,
+                        0
+                      );
                       pendingSelectionRef.current = { start: fullLen, end: fullLen };
                       setSelectionRange({ start: fullLen, end: fullLen });
                     }
