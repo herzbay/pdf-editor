@@ -12,8 +12,13 @@ import {
   FilePlus2,
   Loader2,
   ShieldCheck,
+  Bold,
+  Italic,
+  Minus,
+  Plus,
+  Type,
 } from 'lucide-react';
-import { TextItemOverlay } from '@/types/pdf';
+import { DetectedFontFamily, TextItemOverlay } from '@/types/pdf';
 import { loadPdfDocument, renderPageAndExtractText } from '@/lib/pdfParser';
 import { exportEditedPdf } from '@/lib/pdfExporter';
 
@@ -21,6 +26,13 @@ interface PdfEditorWorkspaceProps {
   file: File;
   onResetFile: () => void;
 }
+
+const TEXT_COLORS = [
+  { label: 'Hitam', value: { r: 0, g: 0, b: 0 }, hex: '#000000' },
+  { label: 'Abu Gelap', value: { r: 0.25, g: 0.25, b: 0.25 }, hex: '#404040' },
+  { label: 'Biru Navy', value: { r: 0.08, g: 0.22, b: 0.55 }, hex: '#14388C' },
+  { label: 'Merah Tua', value: { r: 0.72, g: 0.11, b: 0.11 }, hex: '#B91C1C' },
+];
 
 export default function PdfEditorWorkspace({
   file,
@@ -86,6 +98,11 @@ export default function PdfEditorWorkspace({
                 return {
                   ...newItem,
                   currentText: oldItem.currentText,
+                  fontFamily: oldItem.fontFamily,
+                  isBold: oldItem.isBold,
+                  isItalic: oldItem.isItalic,
+                  fontSize: oldItem.fontSize,
+                  textColor: oldItem.textColor,
                   isEdited: true,
                 };
               }
@@ -108,32 +125,40 @@ export default function PdfEditorWorkspace({
   }, [pdfDoc, currentPage, scale]);
 
   const currentOverlays = pagesOverlays[currentPage] || [];
+  const activeItem = currentOverlays.find((item) => item.id === activeItemId) || null;
 
-  const handleTextChange = (id: string, newValue: string) => {
+  // Helper generik untuk memperbarui properti teks atau gaya pada item aktif
+  const updateItem = (id: string, updates: Partial<TextItemOverlay>) => {
     setPagesOverlays((prev) => ({
       ...prev,
-      [currentPage]: prev[currentPage].map((item) =>
-        item.id === id
-          ? {
-              ...item,
-              currentText: newValue,
-              isEdited: newValue !== item.originalText,
-            }
-          : item
-      ),
+      [currentPage]: prev[currentPage].map((item) => {
+        if (item.id !== id) return item;
+        const updated = { ...item, ...updates };
+        // Tandai sebagai isEdited jika teks berubah ATAU ada properti gaya yang diubah manual
+        return {
+          ...updated,
+          isEdited: true,
+        };
+      }),
     }));
   };
 
   const handleResetPage = () => {
-    setPagesOverlays((prev) => ({
-      ...prev,
-      [currentPage]: prev[currentPage].map((item) => ({
-        ...item,
-        currentText: item.originalText,
-        isEdited: false,
-      })),
-    }));
+    // Re-render ulang halaman agar gaya & teks kembali ke kondisi awal ekstraksi
+    setPagesOverlays((prev) => {
+      const copy = { ...prev };
+      delete copy[currentPage];
+      return copy;
+    });
     setActiveItemId(null);
+    // Trigger re-render dengan sedikit menggeser state atau memanggil ulang parser
+    if (pdfDoc && canvasRef.current) {
+      renderPageAndExtractText(pdfDoc, currentPage, canvasRef.current, scale).then(
+        (freshOverlays) => {
+          setPagesOverlays((prev) => ({ ...prev, [currentPage]: freshOverlays }));
+        }
+      );
+    }
   };
 
   const handleExport = async () => {
@@ -166,8 +191,8 @@ export default function PdfEditorWorkspace({
 
   return (
     <div className="flex flex-col h-screen bg-slate-100">
-      {/* Top Toolbar dengan Aksen Merah Tua & Putih */}
-      <header className="bg-white border-b border-red-100 px-4 py-3 flex flex-wrap items-center justify-between gap-4 shadow-sm z-20">
+      {/* Top Navbar */}
+      <header className="bg-white border-b border-red-100 px-4 py-2.5 flex flex-wrap items-center justify-between gap-4 shadow-xs z-30">
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 bg-red-700 rounded-lg flex items-center justify-center text-white font-bold text-[11px] tracking-wider shrink-0">
             PDF
@@ -185,7 +210,7 @@ export default function PdfEditorWorkspace({
           </span>
           {editedCount > 0 && (
             <span className="text-xs bg-red-100 text-red-800 px-2.5 py-0.5 rounded-full font-semibold">
-              {editedCount} teks diubah
+              {editedCount} bagian diubah
             </span>
           )}
         </div>
@@ -262,9 +287,134 @@ export default function PdfEditorWorkspace({
         </div>
       </header>
 
-      {/* Petunjuk Singkat */}
-      <div className="bg-red-50 border-b border-red-100 py-1.5 px-4 text-center text-xs text-red-900">
-        Klik langsung pada teks di dalam dokumen untuk mulai mengedit, lalu tekan <strong>Enter</strong> atau klik di luar kotak.
+      {/* Text Formatting Toolbar (Muncul interaktif saat ada kotak teks yang dipilih) */}
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="bg-white border-b border-slate-200 px-4 py-2 flex flex-wrap items-center justify-center gap-3 z-20 min-h-[46px]"
+      >
+        {activeItem ? (
+          <>
+            {/* Pilihan Keluarga Font */}
+            <div className="flex items-center gap-1.5">
+              <Type className="w-4 h-4 text-slate-500" />
+              <select
+                value={activeItem.fontFamily}
+                onChange={(e) =>
+                  updateItem(activeItem.id, {
+                    fontFamily: e.target.value as DetectedFontFamily,
+                  })
+                }
+                className="text-xs font-medium text-slate-800 bg-slate-50 border border-slate-300 rounded-md px-2 py-1 focus:outline-none focus:border-red-700"
+              >
+                <option value="serif">Serif (Times New Roman)</option>
+                <option value="sans">Sans-Serif (Arial / Helvetica)</option>
+                <option value="mono">Monospace (Courier)</option>
+              </select>
+            </div>
+
+            <div className="h-4 w-[1px] bg-slate-300" />
+
+            {/* Kontrol Ukuran Font */}
+            <div className="flex items-center gap-1 bg-slate-50 border border-slate-300 rounded-md px-1 py-0.5">
+              <button
+                type="button"
+                onClick={() =>
+                  updateItem(activeItem.id, {
+                    fontSize: Math.max(6, Number((activeItem.fontSize - 0.5).toFixed(1))),
+                  })
+                }
+                className="p-1 hover:bg-white hover:text-red-700 rounded transition"
+                title="Perkecil Ukuran Font"
+              >
+                <Minus className="w-3.5 h-3.5" />
+              </button>
+              <span className="text-xs font-semibold text-slate-700 px-1.5 min-w-[36px] text-center">
+                {Math.round(activeItem.fontSize)} pt
+              </span>
+              <button
+                type="button"
+                onClick={() =>
+                  updateItem(activeItem.id, {
+                    fontSize: Math.min(72, Number((activeItem.fontSize + 0.5).toFixed(1))),
+                  })
+                }
+                className="p-1 hover:bg-white hover:text-red-700 rounded transition"
+                title="Perbesar Ukuran Font"
+              >
+                <Plus className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            <div className="h-4 w-[1px] bg-slate-300" />
+
+            {/* Tombol Bold & Italic */}
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() =>
+                  updateItem(activeItem.id, { isBold: !activeItem.isBold })
+                }
+                className={`p-1.5 rounded-md border transition ${
+                  activeItem.isBold
+                    ? 'bg-red-700 text-white border-red-700'
+                    : 'bg-white text-slate-700 border-slate-300 hover:bg-red-50'
+                }`}
+                title="Tebal (Bold)"
+              >
+                <Bold className="w-3.5 h-3.5" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  updateItem(activeItem.id, { isItalic: !activeItem.isItalic })
+                }
+                className={`p-1.5 rounded-md border transition ${
+                  activeItem.isItalic
+                    ? 'bg-red-700 text-white border-red-700'
+                    : 'bg-white text-slate-700 border-slate-300 hover:bg-red-50'
+                }`}
+                title="Miring (Italic)"
+              >
+                <Italic className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            <div className="h-4 w-[1px] bg-slate-300" />
+
+            {/* Pilihan Warna Teks */}
+            <div className="flex items-center gap-1.5">
+              {TEXT_COLORS.map((color) => {
+                const isColorSelected =
+                  Math.abs(activeItem.textColor.r - color.value.r) < 0.05 &&
+                  Math.abs(activeItem.textColor.g - color.value.g) < 0.05 &&
+                  Math.abs(activeItem.textColor.b - color.value.b) < 0.05;
+
+                return (
+                  <button
+                    key={color.label}
+                    type="button"
+                    onClick={() =>
+                      updateItem(activeItem.id, { textColor: color.value })
+                    }
+                    style={{ backgroundColor: color.hex }}
+                    className={`w-5 h-5 rounded-full border transition-transform ${
+                      isColorSelected
+                        ? 'ring-2 ring-offset-1 ring-red-700 scale-110 border-white'
+                        : 'border-slate-300 hover:scale-105'
+                    }`}
+                    title={`Warna: ${color.label}`}
+                  />
+                );
+              })}
+            </div>
+          </>
+        ) : (
+          <span className="text-xs text-red-900">
+            Klik langsung pada teks di dalam dokumen untuk mulai mengedit atau mengatur{' '}
+            <strong>Font, Bold, Italic, & Ukuran</strong>.
+          </span>
+        )}
       </div>
 
       {/* Workspace Canvas Area */}
@@ -282,7 +432,7 @@ export default function PdfEditorWorkspace({
           {/* Layer 1: Canvas PDF.js */}
           <canvas ref={canvasRef} className="block" />
 
-{/* Layer 2: Overlay Kotak Teks Interaktif */}
+          {/* Layer 2: Overlay Kotak Teks Interaktif */}
           <div className="absolute inset-0">
             {currentOverlays.map((item) => {
               const isSelected = activeItemId === item.id;
@@ -290,7 +440,10 @@ export default function PdfEditorWorkspace({
                 item.backgroundColor.g * 255
               )}, ${Math.round(item.backgroundColor.b * 255)})`;
 
-              // Petakan font family ke CSS font yang akurat
+              const textRgb = `rgb(${Math.round(item.textColor.r * 255)}, ${Math.round(
+                item.textColor.g * 255
+              )}, ${Math.round(item.textColor.b * 255)})`;
+
               const cssFontFamily =
                 item.fontFamily === 'serif'
                   ? '"Times New Roman", Times, Georgia, serif'
@@ -317,6 +470,7 @@ export default function PdfEditorWorkspace({
                     fontFamily: cssFontFamily,
                     fontWeight: item.isBold ? 'bold' : 'normal',
                     fontStyle: item.isItalic ? 'italic' : 'normal',
+                    color: textRgb,
                   }}
                   className={`group cursor-text flex items-center transition-colors ${
                     isSelected
@@ -331,7 +485,9 @@ export default function PdfEditorWorkspace({
                       type="text"
                       autoFocus
                       value={item.currentText}
-                      onChange={(e) => handleTextChange(item.id, e.target.value)}
+                      onChange={(e) =>
+                        updateItem(item.id, { currentText: e.target.value })
+                      }
                       onKeyDown={(e) => {
                         if (e.key === 'Enter' || e.key === 'Escape') {
                           setActiveItemId(null);
@@ -342,13 +498,14 @@ export default function PdfEditorWorkspace({
                         fontWeight: item.isBold ? 'bold' : 'normal',
                         fontStyle: item.isItalic ? 'italic' : 'normal',
                         fontSize: `${computedFontSize}px`,
+                        color: textRgb,
                         lineHeight: 1,
                         width: `${Math.max(
                           item.screenRect.width + 24,
                           item.currentText.length * (computedFontSize * 0.55)
                         )}px`,
                       }}
-                      className="bg-transparent text-black outline-none border-none p-0 m-0"
+                      className="bg-transparent outline-none border-none p-0 m-0"
                     />
                   ) : (
                     item.isEdited && (
@@ -358,9 +515,10 @@ export default function PdfEditorWorkspace({
                           fontWeight: item.isBold ? 'bold' : 'normal',
                           fontStyle: item.isItalic ? 'italic' : 'normal',
                           fontSize: `${computedFontSize}px`,
+                          color: textRgb,
                           lineHeight: 1,
                         }}
-                        className="text-black whitespace-nowrap block"
+                        className="whitespace-nowrap block"
                       >
                         {item.currentText}
                       </span>
