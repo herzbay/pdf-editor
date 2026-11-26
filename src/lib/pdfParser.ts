@@ -47,18 +47,17 @@ export async function renderPageAndExtractText(
     const pdfWidth = item.width;
     const pdfHeight = Math.hypot(tx[2], tx[3]); // Estimasi tinggi font dalam unit PDF
 
-    // Konversi koordinat PDF ke koordinat layar HTML
-    const rect = viewport.convertToViewportRectangle([
-      pdfX,
-      pdfY,
+    // Konversi dua titik sudut diagonal PDF ke koordinat layar HTML menggunakan convertToViewportPoint
+    const bottomLeft = viewport.convertToViewportPoint(pdfX, pdfY);
+    const topRight = viewport.convertToViewportPoint(
       pdfX + pdfWidth,
-      pdfY + pdfHeight,
-    ]);
+      pdfY + pdfHeight
+    );
 
-    const minX = Math.min(rect[0], rect[2]);
-    const minY = Math.min(rect[1], rect[3]);
-    const width = Math.abs(rect[2] - rect[0]);
-    const height = Math.abs(rect[3] - rect[1]);
+    const minX = Math.min(bottomLeft[0], topRight[0]);
+    const minY = Math.min(bottomLeft[1], topRight[1]);
+    const width = Math.abs(topRight[0] - bottomLeft[0]);
+    const height = Math.abs(topRight[1] - bottomLeft[1]);
 
     // 3. Smart Background Color Sampling (ambil piksel sedikit di atas kiri teks)
     const sampleX = Math.max(0, Math.floor(minX - 2));
@@ -88,7 +87,7 @@ export async function renderPageAndExtractText(
         g: pixel[1] / 255,
         b: pixel[2] / 255,
       },
-      textColor: { r: 0, g: 0, b: 0 }, // Default hitam
+      textColor: { r: 0, g: 0, b: 0 },
       isEdited: false,
     });
   });
