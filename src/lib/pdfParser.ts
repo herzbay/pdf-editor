@@ -43,9 +43,7 @@ function detectFontMetadata(
     rawName.includes('heavy') ||
     rawName.includes('700');
 
-  const isItalic =
-    rawName.includes('italic') ||
-    rawName.includes('oblique');
+  const isItalic = rawName.includes('italic') || rawName.includes('oblique');
 
   return { fontFamily, isBold, isItalic };
 }
@@ -84,8 +82,6 @@ export async function renderPageAndExtractText(
     const pdfWidth = item.width;
     const pdfHeight = Math.hypot(tx[2], tx[3]);
 
-    // Tambahkan toleransi descender (-0.22 * pdfHeight) dan ascender (+0.95 * pdfHeight)
-    // agar seluruh tubuh huruf dari atas sampai ekor bawah (g, y, p, q) tertutup sempurna
     const bottomLeft = viewport.convertToViewportPoint(
       pdfX,
       pdfY - pdfHeight * 0.22
@@ -100,7 +96,6 @@ export async function renderPageAndExtractText(
     const width = Math.abs(topRight[0] - bottomLeft[0]);
     const height = Math.abs(topRight[1] - bottomLeft[1]);
 
-    // Ambil sampel warna piksel background
     const sampleX = Math.max(0, Math.floor(minX - 2));
     const sampleY = Math.max(0, Math.floor(minY - 2));
     const pixel = context.getImageData(sampleX, sampleY, 1, 1).data;
@@ -110,11 +105,22 @@ export async function renderPageAndExtractText(
       styles
     );
 
+    const defaultColor = { r: 0, g: 0, b: 0 };
+
     overlays.push({
       id: `page-${pageNumber}-item-${index}`,
       pageIndex: pageNumber - 1,
       originalText: str,
-      currentText: str,
+      segments: [
+        {
+          text: str,
+          fontFamily,
+          fontSize: pdfHeight,
+          isBold,
+          isItalic,
+          textColor: defaultColor,
+        },
+      ],
       screenRect: {
         x: minX,
         y: minY,
@@ -136,7 +142,7 @@ export async function renderPageAndExtractText(
         g: pixel[1] / 255,
         b: pixel[2] / 255,
       },
-      textColor: { r: 0, g: 0, b: 0 },
+      textColor: defaultColor,
       isEdited: false,
     });
   });

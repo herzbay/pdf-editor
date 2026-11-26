@@ -8,7 +8,6 @@ export async function exportEditedPdf(
   const pdfDoc = await PDFDocument.load(originalArrayBuffer);
   const pages = pdfDoc.getPages();
 
-  // Embed keluarga font standar PDF
   const fonts: Record<string, PDFFont> = {
     'sans-normal': await pdfDoc.embedFont(StandardFonts.Helvetica),
     'sans-bold': await pdfDoc.embedFont(StandardFonts.HelveticaBold),
@@ -35,7 +34,7 @@ export async function exportEditedPdf(
     const { x, y, width, height } = item.pdfRect;
     const { r, g, b } = item.backgroundColor;
 
-    // 1. Tutup teks lama dengan padding yang pas hingga ke bagian descender bawah
+    // 1. Tutup seluruh area teks asli dengan smart background color
     page.drawRectangle({
       x: x - 1,
       y: y - height * 0.25,
@@ -44,24 +43,31 @@ export async function exportEditedPdf(
       color: rgb(r, g, b),
     });
 
-    // 2. Pilih font yang paling cocok dengan teks asli
-    let styleSuffix = 'normal';
-    if (item.isBold && item.isItalic) styleSuffix = 'bold-italic';
-    else if (item.isBold) styleSuffix = 'bold';
-    else if (item.isItalic) styleSuffix = 'italic';
+    // 2. Gambar tiap segmen secara berurutan dari kiri ke kanan
+    let currentX = x;
 
-    const selectedFont =
-      fonts[`${item.fontFamily}-${styleSuffix}`] || fonts['serif-normal'];
+    for (const seg of item.segments) {
+      if (!seg.text) continue;
 
-    // 3. Cetak teks baru di baseline asli
-    if (item.currentText.trim() !== '') {
-      page.drawText(item.currentText, {
-        x: x,
+      let styleSuffix = 'normal';
+      if (seg.isBold && seg.isItalic) styleSuffix = 'bold-italic';
+      else if (seg.isBold) styleSuffix = 'bold';
+      else if (seg.isItalic) styleSuffix = 'italic';
+
+      const selectedFont =
+        fonts[`${seg.fontFamily}-${styleSuffix}`] || fonts['serif-normal'];
+
+      page.drawText(seg.text, {
+        x: currentX,
         y: y,
-        size: item.fontSize,
+        size: seg.fontSize,
         font: selectedFont,
-        color: rgb(item.textColor.r, item.textColor.g, item.textColor.b),
+        color: rgb(seg.textColor.r, seg.textColor.g, seg.textColor.b),
       });
+
+      // Geser posisi X sesuai lebar presisi segmen ini di PDF
+      const segWidth = selectedFont.widthOfTextAtSize(seg.text, seg.fontSize);
+      currentX += segWidth;
     }
   }
 
