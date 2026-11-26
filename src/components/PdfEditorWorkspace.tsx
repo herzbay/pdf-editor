@@ -282,13 +282,23 @@ export default function PdfEditorWorkspace({
           {/* Layer 1: Canvas PDF.js */}
           <canvas ref={canvasRef} className="block" />
 
-          {/* Layer 2: Overlay Kotak Teks Interaktif */}
+{/* Layer 2: Overlay Kotak Teks Interaktif */}
           <div className="absolute inset-0">
             {currentOverlays.map((item) => {
               const isSelected = activeItemId === item.id;
               const bgRgb = `rgb(${Math.round(item.backgroundColor.r * 255)}, ${Math.round(
                 item.backgroundColor.g * 255
               )}, ${Math.round(item.backgroundColor.b * 255)})`;
+
+              // Petakan font family ke CSS font yang akurat
+              const cssFontFamily =
+                item.fontFamily === 'serif'
+                  ? '"Times New Roman", Times, Georgia, serif'
+                  : item.fontFamily === 'mono'
+                  ? '"Courier New", Courier, monospace'
+                  : 'Arial, Helvetica, sans-serif';
+
+              const computedFontSize = item.fontSize * scale;
 
               return (
                 <div
@@ -301,15 +311,18 @@ export default function PdfEditorWorkspace({
                     position: 'absolute',
                     left: `${item.screenRect.x}px`,
                     top: `${item.screenRect.y}px`,
-                    minWidth: `${item.screenRect.width}px`,
+                    minWidth: `${item.screenRect.width + 4}px`,
                     height: `${item.screenRect.height}px`,
                     backgroundColor: item.isEdited || isSelected ? bgRgb : 'transparent',
+                    fontFamily: cssFontFamily,
+                    fontWeight: item.isBold ? 'bold' : 'normal',
+                    fontStyle: item.isItalic ? 'italic' : 'normal',
                   }}
-                  className={`group cursor-text transition-colors ${
+                  className={`group cursor-text flex items-center transition-colors ${
                     isSelected
                       ? 'ring-2 ring-red-700 z-20'
                       : item.isEdited
-                      ? 'ring-1 ring-red-400 z-10'
+                      ? 'ring-1 ring-red-300 z-10'
                       : 'hover:ring-1 hover:ring-red-500 hover:bg-red-500/10'
                   }`}
                 >
@@ -325,23 +338,29 @@ export default function PdfEditorWorkspace({
                         }
                       }}
                       style={{
-                        fontSize: `${item.screenRect.height * 0.85}px`,
+                        fontFamily: cssFontFamily,
+                        fontWeight: item.isBold ? 'bold' : 'normal',
+                        fontStyle: item.isItalic ? 'italic' : 'normal',
+                        fontSize: `${computedFontSize}px`,
                         lineHeight: 1,
                         width: `${Math.max(
-                          item.screenRect.width + 20,
-                          item.currentText.length * (item.screenRect.height * 0.55)
+                          item.screenRect.width + 24,
+                          item.currentText.length * (computedFontSize * 0.55)
                         )}px`,
                       }}
-                      className="bg-transparent text-black outline-none border-none p-0 m-0 font-sans"
+                      className="bg-transparent text-black outline-none border-none p-0 m-0"
                     />
                   ) : (
                     item.isEdited && (
                       <span
                         style={{
-                          fontSize: `${item.screenRect.height * 0.85}px`,
+                          fontFamily: cssFontFamily,
+                          fontWeight: item.isBold ? 'bold' : 'normal',
+                          fontStyle: item.isItalic ? 'italic' : 'normal',
+                          fontSize: `${computedFontSize}px`,
                           lineHeight: 1,
                         }}
-                        className="text-black whitespace-nowrap block font-sans"
+                        className="text-black whitespace-nowrap block"
                       >
                         {item.currentText}
                       </span>
