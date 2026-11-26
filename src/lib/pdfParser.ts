@@ -1,7 +1,6 @@
 import * as pdfjsLib from 'pdfjs-dist';
-import { TextItemOverlay } from '@/types/pdf';
+import { DetectedFontFamily, TextItemOverlay } from '@/types/pdf';
 
-// Mengarahkan worker ke file lokal di folder public/
 if (typeof window !== 'undefined') {
   pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
 }
@@ -9,6 +8,46 @@ if (typeof window !== 'undefined') {
 export async function loadPdfDocument(arrayBuffer: ArrayBuffer) {
   const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
   return await loadingTask.promise;
+}
+
+function detectFontMetadata(
+  fontName: string,
+  styles: Record<string, any>
+): { fontFamily: DetectedFontFamily; isBold: boolean; isItalic: boolean } {
+  const styleObj = styles?.[fontName];
+  const rawName = `${fontName} ${styleObj?.fontFamily || ''}`.toLowerCase();
+
+  let fontFamily: DetectedFontFamily = 'sans';
+  if (
+    rawName.includes('times') ||
+    rawName.includes('serif') ||
+    rawName.includes('georgia') ||
+    rawName.includes('garamond') ||
+    rawName.includes('cambria') ||
+    rawName.includes('palatino') ||
+    rawName.includes('roman')
+  ) {
+    fontFamily = 'serif';
+  } else if (
+    rawName.includes('courier') ||
+    rawName.includes('mono') ||
+    rawName.includes('consolas') ||
+    rawName.includes('typewriter')
+  ) {
+    fontFamily = 'mono';
+  }
+
+  const isBold =
+    rawName.includes('bold') ||
+    rawName.includes('black') ||
+    rawName.includes('heavy') ||
+    rawName.includes('700');
+
+  const isItalic =
+    rawName.includes('italic') ||
+    rawName.includes('oblique');
+
+  return { fontFamily, isBold, isItalic };
 }
 
 export async function renderPageAndExtractText(
@@ -26,32 +65,34 @@ export async function renderPageAndExtractText(
   canvas.height = viewport.height;
   canvas.width = viewport.width;
 
-  // 1. Render visual PDF ke canvas
   await page.render({
     canvasContext: context,
     viewport: viewport,
   }).promise;
 
-  // 2. Ekstrak konten teks
   const textContent = await page.getTextContent();
+  const styles = (textContent as any).styles || {};
   const overlays: TextItemOverlay[] = [];
 
   textContent.items.forEach((item: any, index: number) => {
     const str = item.str;
     if (!str || str.trim() === '') return;
 
-    // Transform matrix: [scaleX, skewY, skewX, scaleY, translateX, translateY]
     const tx = item.transform;
     const pdfX = tx[4];
     const pdfY = tx[5];
     const pdfWidth = item.width;
-    const pdfHeight = Math.hypot(tx[2], tx[3]); // Estimasi tinggi font dalam unit PDF
+    const pdfHeight = Math.hypot(tx[2], tx[3]);
 
-    // Konversi dua titik sudut diagonal PDF ke koordinat layar HTML menggunakan convertToViewportPoint
-    const bottomLeft = viewport.convertToViewportPoint(pdfX, pdfY);
+    // Tambahkan toleransi descender (-0.22 * pdfHeight) dan ascender (+0.95 * pdfHeight)
+    // agar seluruh tubuh huruf dari atas sampai ekor bawah (g, y, p, q) tertutup sempurna
+    const bottomLeft = viewport.convertToViewportPoint(
+      pdfX,
+      pdfY - pdfHeight * 0.22
+    );
     const topRight = viewport.convertToViewportPoint(
       pdfX + pdfWidth,
-      pdfY + pdfHeight
+      pdfY + pdfHeight * 0.95
     );
 
     const minX = Math.min(bottomLeft[0], topRight[0]);
@@ -59,10 +100,15 @@ export async function renderPageAndExtractText(
     const width = Math.abs(topRight[0] - bottomLeft[0]);
     const height = Math.abs(topRight[1] - bottomLeft[1]);
 
-    // 3. Smart Background Color Sampling (ambil piksel sedikit di atas kiri teks)
+    // Ambil sampel warna piksel background
     const sampleX = Math.max(0, Math.floor(minX - 2));
     const sampleY = Math.max(0, Math.floor(minY - 2));
     const pixel = context.getImageData(sampleX, sampleY, 1, 1).data;
+
+    const { fontFamily, isBold, isItalic } = detectFontMetadata(
+      item.fontName || '',
+      styles
+    );
 
     overlays.push({
       id: `page-${pageNumber}-item-${index}`,
@@ -82,6 +128,9 @@ export async function renderPageAndExtractText(
         height: pdfHeight,
       },
       fontSize: pdfHeight,
+      fontFamily,
+      isBold,
+      isItalic,
       backgroundColor: {
         r: pixel[0] / 255,
         g: pixel[1] / 255,
